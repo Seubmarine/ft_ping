@@ -317,10 +317,6 @@ int main(int argc, char **argv)
 		}
 		// pong_icmp->header.un.echo.id = pong_icmp->header.un.echo.id;
 		// pong_icmp->header.un.echo.sequence = pong_icmp->header.un.echo.sequence;
-		if (pong_icmp->header.type != ICMP_ECHOREPLY) {
-			printf("icmp type isn't echoreply\n");
-			goto recv_label;
-		}
 		struct timeval tm_timediff;
 		MEMZERO(tm_timediff);
 		// timeval_subtract(&tm_timediff, tm_recvmsg, tm_current);
@@ -332,6 +328,11 @@ int main(int argc, char **argv)
 		printf("icmp seqence = %i\n", pong_icmp->header.un.echo.sequence);
 		printf("icmp checksum = %i\n", pong_icmp->header.checksum);
 		printf("icmp checksum reversed = %i\n", internet_checksum((uint16_t *)pong_icmp, sizeof(*pong_icmp)));
+
+		if (pong_icmp->header.type != ICMP_ECHOREPLY) {
+			printf("icmp type isn't echoreply\n");
+			goto recv_label;
+		}
 
 		printf("icmp_packet = "),
 		print_raw(icmp);
