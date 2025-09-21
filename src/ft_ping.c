@@ -148,6 +148,16 @@ void _print_raw(unsigned char *data, size_t length) {
 	printf("\n");
 }
 
+// void print_verbose() {
+// 	printf("%u bytes from ", bytes_count_received);
+// 	if (is_raw_ip) {
+// 		printf("%s", raw_ip);
+// 	} else {
+// 		printf("%s (%s)", fqdn, raw_ip);
+// 	}
+// 	printf("icmp_seq=%i ident=%i ttl=%i time=%f ms\n", sequence, identifier, time_to_live, time_ms);
+// }
+
 int main(int argc, char **argv)
 {
 	if (argc < 2)
@@ -164,6 +174,8 @@ int main(int argc, char **argv)
 		.protocol = IPPROTO_ICMP,
 		.check = 0, // checksum value before actually making the checksum
 	};
+
+	pid_t pid = getpid();
 
 	struct in_addr ip_destination = {};
 
@@ -213,7 +225,7 @@ int main(int argc, char **argv)
 	icmp.header.code = 0;
 	icmp.header.checksum = 0;
 	icmp.header.un.echo.sequence = 0;
-	icmp.header.un.echo.id = 42;
+	icmp.header.un.echo.id = pid;
 
 	int raw_socket = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
 	if (raw_socket == -1)
@@ -315,11 +327,9 @@ int main(int argc, char **argv)
 		{
 			printf("cmsg error\n");
 		}
-		// pong_icmp->header.un.echo.id = pong_icmp->header.un.echo.id;
-		// pong_icmp->header.un.echo.sequence = pong_icmp->header.un.echo.sequence;
 		struct timeval tm_timediff;
 		MEMZERO(tm_timediff);
-		// timeval_subtract(&tm_timediff, tm_recvmsg, tm_current);
+
 		printf("id: %i seq: %i\n", pong_icmp->header.un.echo.id, pong_icmp->header.un.echo.sequence);
 		printf("pong icmp:\n");
 		printf("icmp type = %i\n", pong_icmp->header.type);
@@ -331,6 +341,10 @@ int main(int argc, char **argv)
 
 		if (pong_icmp->header.type != ICMP_ECHOREPLY) {
 			printf("icmp type isn't echoreply\n");
+			goto recv_label;
+		}
+		if (pong_icmp->header.un.echo.id != pid) {
+			printf("ping didn't originate from this process\n");
 			goto recv_label;
 		}
 
