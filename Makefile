@@ -23,7 +23,7 @@ fclean : clean
 re : fclean $(NAME)
 
 $(NAME) : $(OBJS)
-	$(CC) $(CFLAGS) $(INCLUDE) $(OBJS) $(LDFLAGS) -o $(NAME)
+	$(CC) $(CFLAGS) $(INCLUDE) $(OBJS) $(LDFLAGS) -lm -o $(NAME)
 	sudo setcap cap_net_raw=ep ./ft_ping
 
 .PHONY: all clean fclean re

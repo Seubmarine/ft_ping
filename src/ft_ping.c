@@ -114,7 +114,7 @@ void compute_ip_checksum(struct iphdr *iphdrp)
 struct icmp_packet
 {
 	struct icmphdr header;
-	struct timespec data;	
+	struct timespec data;
 };
 
 #define print_raw(X) _print_raw((unsigned char *)&X, sizeof(X))
@@ -127,12 +127,61 @@ void _print_raw(unsigned char *data, size_t length) {
 	printf("\n");
 }
 
-void print_verbose(char *resolved_name, char *ip_str, struct iphdr *ip_header, struct icmp_packet *icmp, float time_ms) {
-	// printf("%u bytes from ", bytes_count_received);
-	// if (is_raw_ip) {
-	// 	printf("%s", raw_ip);
-	printf("%s (%s): ", resolved_name, ip_str);
+void print_verbose(char *resolved_name, char *ip_str, struct iphdr *ip_header, struct icmp_packet *icmp, float time_ms, ssize_t packet_size) {
+	printf("%lu bytes from ", packet_size);
+	if (resolved_name[0] == '\0') {
+		printf("%s: ", ip_str);
+	} else {
+		printf("%s (%s): ", resolved_name, ip_str);
+	}
 	printf("icmp_seq=%i ident=%i ttl=%i time=%.3f ms\n", icmp->header.un.echo.sequence, icmp->header.un.echo.id, ip_header->ttl, time_ms);
+}
+
+#include <math.h>
+struct rtt_info {
+	double min_rtt;
+	double max_rtt;
+	double sum_rtt;
+	double mean;
+	double M2; // for variance
+	int count;
+};
+
+void rtt_info_init(struct rtt_info *rtts) {
+	rtts->min_rtt = +INFINITY;
+	rtts->max_rtt = -INFINITY;
+	rtts->sum_rtt = 0;
+	rtts->mean = 0;
+	rtts->M2 = 0; // for variance
+	rtts->count = 0;
+}
+
+void rtt_info_calculate(struct rtt_info *rtts, double current_rtt) {
+	rtts->count++;
+
+	// Update min/max
+	if (current_rtt < rtts->min_rtt) {
+		rtts->min_rtt = current_rtt;
+	}
+	if (current_rtt > rtts->max_rtt) {
+		rtts->max_rtt = current_rtt;
+	}
+
+	// Update running mean and variance using Welford's algorithm
+	double delta = current_rtt - rtts->mean;
+	rtts->mean += delta / rtts->count;
+	double delta2 = current_rtt - rtts->mean;
+	rtts->M2 += delta * delta2;
+
+	// sum for average if you want
+	rtts->sum_rtt += current_rtt;
+}
+
+void rtt_info_print(struct rtt_info *rtts) {
+
+
+	double mdev = sqrt(rtts->M2 / rtts->count);
+	printf("rtt min/avg/max/mdev = %.3f/%.3f/%.3f/%.3f ms\n", rtts->min_rtt, rtts->mean, rtts->max_rtt, mdev);
 }
 
 int main(int argc, char **argv)
@@ -140,26 +189,13 @@ int main(int argc, char **argv)
 	if (argc < 2)
 		return 1;
 
-	// struct iphdr raw_ip = {
-	// 	.version = IPVERSION,
-	// 	.ihl = (sizeof(raw_ip) / 4),		   // may need change
-	// 	.tos = IPTOS_CLASS_CS2,				   // type of service //should be good
-	// 	.tot_len = sizeof(struct iphdr) + sizeof(struct icmp_packet), //! Total length of datagram //may need change
-	// 	.id = 0,
-	// 	.frag_off = 0,
-	// 	.ttl = 64,
-	// 	.protocol = IPPROTO_ICMP,
-	// 	.check = 0, // checksum value before actually making the checksum
-	// };
-
 	pid_t pid = getpid();
 
-	struct in_addr ip_destination = {};
-
-	inet_pton(AF_INET, argv[1], &ip_destination);
-	// print_in_addr(&ip_destination);
-
 	char *input = argv[1];
+	struct rtt_info rtts;
+	rtt_info_init(&rtts);
+
+	int is_verbose = 1;
 
 	//Name resolution
 	struct addrinfo hints = {
@@ -180,7 +216,6 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	struct sockaddr_in *ipv4 = (struct sockaddr_in *)address_info->ai_addr;
-	print_in_addr(&ipv4->sin_addr);
 	char addr_string[INET_ADDRSTRLEN + 1];
 	addr_string[INET_ADDRSTRLEN] = 0;
 	inet_ntop(AF_INET, &ipv4->sin_addr, addr_string, sizeof(addr_string));
@@ -190,25 +225,19 @@ int main(int argc, char **argv)
     int status = getnameinfo(address_info->ai_addr, address_info->ai_addrlen,
                          resolved_name, sizeof resolved_name,
                          NULL, 0, NI_NAMEREQD);
-    if (status == 0) {
-        printf("Reverse name: %s\n", resolved_name);
-    } else {
+    if (status != 0) {
         fprintf(stderr, "getnameinfo: %s\n", gai_strerror(status));
     }
 
-	freeaddrinfo(address_info);
+    struct in_addr _test_ip;
+	int input_is_ip = inet_pton(AF_INET, input, &_test_ip) == 1;
+    if (input_is_ip) {
+		resolved_name[0] = '\0';
+	}
 
-	// raw_ip.saddr = ipv4->sin_addr.s_addr;
-	// raw_ip.daddr = ip_destination.s_addr;
 
-	// print_in_addr(raw_ip.)
-	// compute_ip_checksum(&raw_ip);
-
-	// printf("ip_checksum: %x\ninternet_checksum: %x\n", compute_checksum((uint16_t *)&raw_ip, sizeof(raw_ip)), internet_checksum((uint16_t *)&raw_ip, sizeof(raw_ip)));
-
+	//Icmp initialisation
 	struct icmp_packet icmp;
-
-	// struct icmphdr *icmp =;
 	MEMZERO(icmp);
 	icmp.header.type = ICMP_ECHO;
 	icmp.header.code = 0;
@@ -222,13 +251,20 @@ int main(int argc, char **argv)
 		perror("ft_ping: socket:");
 		return 1;
 	}
-
-	//Enable the TTL and TIMESTAMP for a tcp (icmp?) packet
-	int enable = 1;
-	setsockopt(raw_socket, SOL_SOCKET, SO_TIMESTAMP, &enable, sizeof(enable));
+	if (is_verbose) {
+		printf("ping: sock4.fd = %i (socktype: SOCK_RAW), hints.ai_family: AF_INET\n", raw_socket);
+		printf("\n");
+	}
+	printf("ai->ai_family: AF_INET, ai->ai_canonname: '%s'\n", address_info->ai_canonname);
+	freeaddrinfo(address_info);
 
 	struct sockaddr_in dest = {.sin_family = AF_INET, .sin_addr = ipv4->sin_addr, .sin_port = 0};
 
+	printf("PING %s (%s) 56(84) bytes of data.\n", input, addr_string);
+
+	int is_first_ping = 1;
+	struct timespec first_ping_timespec;
+	MEMZERO(first_ping_timespec);
 	while (1)
 	{
 		clock_gettime(CLOCK_MONOTONIC, &icmp.data);
@@ -237,22 +273,19 @@ int main(int argc, char **argv)
 		icmp.header.checksum = 0;
 		icmp.header.un.echo.sequence = icmp.header.un.echo.sequence + 1;
 		icmp.header.checksum = internet_checksum((uint16_t *)&icmp, sizeof(icmp));
-		// printf("ping icmp.header.checksum = %u\n", icmp.header.checksum);
-		// uint16_t reversed = internet_checksum((uint16_t *)&icmp, sizeof(icmp));
-		// printf("ping icmp.header.checksum reversed = %u\n", reversed);
-		// printf("ping icmp echo sequence: %i\n", icmp.header.un.echo.sequence);
-		
-		ssize_t write_result = sendto(raw_socket, &icmp, sizeof(icmp), 0, (struct sockaddr *)&dest, sizeof(dest));
+
+		unsigned char packet[64];
+		MEMZERO(packet);
+		memcpy(packet, &icmp, sizeof(icmp));
+		ssize_t write_result = sendto(raw_socket, packet, sizeof(packet), 0, (struct sockaddr *)&dest, sizeof(dest));
 		if (write_result == -1)
 		{
 			perror("socket: write");
 			return 1;
 		}
 
-		// printf("bytes writen to socket:%li\n", write_result);
-
-		char buf[BUFSIZ];
-		char cbuf[BUFSIZ];
+		char buf[64];
+		char cbuf[64];
 		struct msghdr msg;
 		struct iovec iov;
 
@@ -265,22 +298,20 @@ int main(int argc, char **argv)
 		msg.msg_control = cbuf;
 		msg.msg_controllen = ARRAY_BYTES(cbuf);
 		
+		//In case of bad icmp packet we go back to recv call
 		recv_label:
-		// printf("\n\nPONG:\n");
-		////RECEIVED A RESPONSE FROM ICMP ECHO
 		ssize_t recv_result = recvmsg(raw_socket, &msg, MSG_WAITALL);
 		if (recv_result == -1)
 		{
 			perror("socket: recvmsg");
 		}
-		// printf("bytes recv from socket:%li\n", recv_result);
-		//Getting the ip and verifying it's checksum
+
+		//We verify ip checksum of the entire packet
 		struct iphdr *pong_ip = iov.iov_base;
 		int ip_checksum = internet_checksum((uint16_t *)pong_ip, sizeof(*pong_ip));
 		if (ip_checksum != 0) {
 			printf("ip header checksum is invalid\n");
 		}
-		// printf("pong ip header checksum%i\n", ip_checksum);
 
 		//We get the icmp header by adding the size of the ip header, which can be between 20 and 60 of size
 		//That's why we use ip_header_length * (sizeof a 32byte)
@@ -290,41 +321,8 @@ int main(int argc, char **argv)
 		if (icmp_checksum != 0) {
 			printf("icmp header checksum is invalid\n");
 		}
-		// printf("pong icmp header checksum%i\n", icmp_checksum);
-		
-		//Getting received packet source and destination address for debugging
 
-		//The time to live of the received packet
-		// printf("pong_ip ttl: %i\n", pong_ip->ttl);
-		// printf("pong_ip ihl %i\n", pong_ip->ihl * 4);
-
-		// struct cmsghdr *cmsg;
-		// struct timeval tm_recvmsg;
-		// for (cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg))
-		// {
-		// 	// if (cmsg->cmsg_level == SOL_SOCKET &&
-		// 		// cmsg->cmsg_type == SCM_TIMESTAMP)
-		// 	{
-		// 		memcpy(&tm_recvmsg, CMSG_DATA(cmsg), sizeof(tm_recvmsg));
-		// 		break;
-		// 	}
-		// }
-		// if (cmsg == NULL)
-		// {
-		// 	printf("cmsg error\n");
-		// }
-		struct timeval tm_timediff;
-		MEMZERO(tm_timediff);
-
-		// printf("id: %i seq: %i\n", pong_icmp->header.un.echo.id, pong_icmp->header.un.echo.sequence);
-		// printf("pong icmp:\n");
-		// printf("icmp type = %i\n", pong_icmp->header.type);
-		// printf("icmp code = %i\n", pong_icmp->header.code);
-		// printf("icmp id = %i\n", pong_icmp->header.un.echo.id);
-		// printf("icmp seqence = %i\n", pong_icmp->header.un.echo.sequence);
-		// printf("icmp checksum = %i\n", pong_icmp->header.checksum);
-		// printf("icmp checksum reversed = %i\n", internet_checksum((uint16_t *)pong_icmp, sizeof(*pong_icmp)));
-
+		//This will be called when sending a ping to localhost
 		if (pong_icmp->header.type != ICMP_ECHOREPLY) {
 			// printf("icmp type isn't echoreply\n");
 			goto recv_label;
@@ -338,36 +336,26 @@ int main(int argc, char **argv)
 			goto recv_label;
 		}
 
-		// printf("icmp_packet = "),
-		// print_raw(icmp);
-		// printf("pong_packet = ");
-		// print_raw(*pong_icmp);
-		// _print_raw(((unsigned char *)&pong->icmp), sizeof(&pong_icmp->header));
-
-		// struct timeval tm_current = pong_icmp->data;
+		//Get the stored time in the icmp data section
 		ping_timespec = pong_icmp->data;
 
 		struct timespec pong_timespec;
 		clock_gettime(CLOCK_MONOTONIC, &pong_timespec);
 
-		// tm_current.tv_sec = ntohs(tm_current.tv_sec);
-		// tm_current.tv_usec = ntohs(tm_current.tv_usec);
-		// print_raw(&pong);
-		// tm_current.tv_sec = ntohl(tm_current.tv_sec);
-		// tm_current.tv_usec = ntohl(tm_current.tv_usec);
-		// printf("recvmsg time: %lis%lims\n", tm_recvmsg.tv_sec, tm_recvmsg.tv_usec);
-		
-		// printf("ping_time: %lis%lims\n", ping_timespec.tv_sec, ping_timespec.tv_usec);
-		// printf("pong_time: %lis%lims\n", pong_timespec.tv_sec, pong_timespec.tv_usec);
-		
-		// printf("diff: %lis%lims\n", tm_timediff.tv_sec, tm_timediff.tv_usec);
 
+		if (is_first_ping) {
+			is_first_ping = 0;
+			first_ping_timespec = ping_timespec;
+		}
+
+		//Calculate time difference
 		double msec = (pong_timespec.tv_sec - ping_timespec.tv_sec) * 1000.0 +
                   (pong_timespec.tv_nsec - ping_timespec.tv_nsec) / 1e6;
-
-		print_verbose(resolved_name, addr_string, pong_ip, pong_icmp, msec);
+		//We remove the ip header len from the total ip packet len received
+		int bytes_received_count = ntohs(pong_ip->tot_len) - (pong_ip->ihl * 4);
+		print_verbose(resolved_name, addr_string, pong_ip, pong_icmp, msec, bytes_received_count);
 		sleep(1);
-		// printf("%.2f ms\n", ms);
-		// printf("ping of %li s %li ms\n", tm_timediff.tv_sec, tm_timediff.tv_usec);
+		rtt_info_calculate(&rtts, msec);
+		rtt_info_print(&rtts);
 	}
 }
