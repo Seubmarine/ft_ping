@@ -127,14 +127,19 @@ void _print_raw(unsigned char *data, size_t length) {
 	printf("\n");
 }
 
-void print_verbose(char *resolved_name, char *ip_str, struct iphdr *ip_header, struct icmp_packet *icmp, float time_ms, ssize_t packet_size) {
+void print_verbose(int is_verbose, char *resolved_name, char *ip_str, struct iphdr *ip_header, struct icmp_packet *icmp, float time_ms, ssize_t packet_size) {
 	printf("%lu bytes from ", packet_size);
 	if (resolved_name[0] == '\0') {
 		printf("%s: ", ip_str);
 	} else {
 		printf("%s (%s): ", resolved_name, ip_str);
 	}
-	printf("icmp_seq=%i ident=%i ttl=%i time=%.3f ms\n", icmp->header.un.echo.sequence, icmp->header.un.echo.id, ip_header->ttl, time_ms);
+
+	printf("icmp_seq=%i ", icmp->header.un.echo.sequence);
+	if (is_verbose) {
+		printf("ident=%i ", icmp->header.un.echo.id);
+	}
+	printf("ttl=%i time=%.3f ms\n", ip_header->ttl, time_ms);
 }
 
 #include <math.h>
@@ -179,23 +184,67 @@ void rtt_info_calculate(struct rtt_info *rtts, double current_rtt) {
 
 void rtt_info_print(struct rtt_info *rtts) {
 
-
 	double mdev = sqrt(rtts->M2 / rtts->count);
+	if (rtts->count == 0)  {
+		printf("\n");
+		return ;
+	}
 	printf("rtt min/avg/max/mdev = %.3f/%.3f/%.3f/%.3f ms\n", rtts->min_rtt, rtts->mean, rtts->max_rtt, mdev);
+}
+
+uint64_t timespec_diff_ms(struct timespec start, struct timespec end) {
+    time_t sec = end.tv_sec - start.tv_sec;
+    long nsec  = end.tv_nsec - start.tv_nsec;
+    if (nsec < 0) {
+        sec  -= 1;
+        nsec += 1000000000L;
+    }
+    return (uint64_t)sec * 1000 + (uint64_t)(nsec / 1000000L);
+}
+
+
+#include <signal.h>
+
+volatile sig_atomic_t quit = 0;
+
+void signal_handler(int signum) {
+	if (signum == SIGINT) {
+		quit = 1;
+	}
 }
 
 int main(int argc, char **argv)
 {
+
+	signal(SIGINT, signal_handler);
 	if (argc < 2)
 		return 1;
 
+
+	char *input = NULL;
+	int is_verbose = 0;
+	// Skip argv[0] (program name)
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-v") == 0) {
+            is_verbose = 1;
+        } else if (argv[i][0] == '-') {
+            fprintf(stderr, "Unknown option: %s\n", argv[i]);
+        } else {
+            // First non-option argument = host
+            if (!input) {
+                input = argv[i];
+            } else {
+	            fprintf(stderr, "Unknown arguments: %s\n", argv[i]);
+				return 1;
+			}
+        }
+    }
+	
+
 	pid_t pid = getpid();
 
-	char *input = argv[1];
 	struct rtt_info rtts;
 	rtt_info_init(&rtts);
-
-	int is_verbose = 1;
 
 	//Name resolution
 	struct addrinfo hints = {
@@ -251,11 +300,18 @@ int main(int argc, char **argv)
 		perror("ft_ping: socket:");
 		return 1;
 	}
+
+
+	// set 1 second recv timeout
+    struct timeval timeout = {1, 0}; // 1 sec
+    setsockopt(raw_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+
 	if (is_verbose) {
 		printf("ping: sock4.fd = %i (socktype: SOCK_RAW), hints.ai_family: AF_INET\n", raw_socket);
 		printf("\n");
+		printf("ai->ai_family: AF_INET, ai->ai_canonname: '%s'\n", address_info->ai_canonname);
 	}
-	printf("ai->ai_family: AF_INET, ai->ai_canonname: '%s'\n", address_info->ai_canonname);
 	freeaddrinfo(address_info);
 
 	struct sockaddr_in dest = {.sin_family = AF_INET, .sin_addr = ipv4->sin_addr, .sin_port = 0};
@@ -263,11 +319,24 @@ int main(int argc, char **argv)
 	printf("PING %s (%s) 56(84) bytes of data.\n", input, addr_string);
 
 	int is_first_ping = 1;
-	struct timespec first_ping_timespec;
+	struct timespec first_ping_timespec = {};
+	struct timespec last_ping_timespec = {};
 	MEMZERO(first_ping_timespec);
-	while (1)
+	MEMZERO(last_ping_timespec);
+	
+	int packet_transmitted = 0;
+	int packet_received = 0;
+
+	while (!quit)
 	{
+		recv_label:
 		clock_gettime(CLOCK_MONOTONIC, &icmp.data);
+
+		if (is_first_ping) {
+			is_first_ping = 0;
+			first_ping_timespec = icmp.data;
+		}
+
 
 		struct timespec ping_timespec = icmp.data;
 		icmp.header.checksum = 0;
@@ -278,6 +347,7 @@ int main(int argc, char **argv)
 		MEMZERO(packet);
 		memcpy(packet, &icmp, sizeof(icmp));
 		ssize_t write_result = sendto(raw_socket, packet, sizeof(packet), 0, (struct sockaddr *)&dest, sizeof(dest));
+		packet_transmitted++;
 		if (write_result == -1)
 		{
 			perror("socket: write");
@@ -299,18 +369,18 @@ int main(int argc, char **argv)
 		msg.msg_controllen = ARRAY_BYTES(cbuf);
 		
 		//In case of bad icmp packet we go back to recv call
-		recv_label:
 		ssize_t recv_result = recvmsg(raw_socket, &msg, MSG_WAITALL);
-		if (recv_result == -1)
-		{
-			perror("socket: recvmsg");
+		(void) recv_result;
+		if (quit) {
+			break;
 		}
 
 		//We verify ip checksum of the entire packet
 		struct iphdr *pong_ip = iov.iov_base;
 		int ip_checksum = internet_checksum((uint16_t *)pong_ip, sizeof(*pong_ip));
 		if (ip_checksum != 0) {
-			printf("ip header checksum is invalid\n");
+			// printf("ip header checksum is invalid\n");
+			goto recv_label;
 		}
 
 		//We get the icmp header by adding the size of the ip header, which can be between 20 and 60 of size
@@ -319,7 +389,8 @@ int main(int argc, char **argv)
 		
 		int icmp_checksum = internet_checksum((uint16_t *)pong_icmp, sizeof(*pong_icmp));
 		if (icmp_checksum != 0) {
-			printf("icmp header checksum is invalid\n");
+			// printf("icmp header checksum is invalid\n");
+			goto recv_label;
 		}
 
 		//This will be called when sending a ping to localhost
@@ -335,27 +406,39 @@ int main(int argc, char **argv)
 		if (pong_icmp->header.un.echo.sequence != icmp.header.un.echo.sequence) {
 			goto recv_label;
 		}
+		packet_received++;
 
 		//Get the stored time in the icmp data section
 		ping_timespec = pong_icmp->data;
 
 		struct timespec pong_timespec;
 		clock_gettime(CLOCK_MONOTONIC, &pong_timespec);
-
-
-		if (is_first_ping) {
-			is_first_ping = 0;
-			first_ping_timespec = ping_timespec;
-		}
+		
+		last_ping_timespec = ping_timespec;
 
 		//Calculate time difference
 		double msec = (pong_timespec.tv_sec - ping_timespec.tv_sec) * 1000.0 +
                   (pong_timespec.tv_nsec - ping_timespec.tv_nsec) / 1e6;
+		
 		//We remove the ip header len from the total ip packet len received
 		int bytes_received_count = ntohs(pong_ip->tot_len) - (pong_ip->ihl * 4);
-		print_verbose(resolved_name, addr_string, pong_ip, pong_icmp, msec, bytes_received_count);
-		sleep(1);
+		print_verbose(is_verbose ,resolved_name, addr_string, pong_ip, pong_icmp, msec, bytes_received_count);
 		rtt_info_calculate(&rtts, msec);
-		rtt_info_print(&rtts);
+		sleep(1);
 	}
+
+	printf("\n");
+	printf("--- %s ping statistics ---\n", input);
+	int loss_percent = 0.0;
+	if (packet_transmitted > 0) {
+	    loss_percent = 100.0 * (packet_transmitted - packet_received) / packet_transmitted;
+	}
+	clock_gettime(CLOCK_MONOTONIC, &last_ping_timespec);
+			
+	int64_t total_time_ms = timespec_diff_ms(first_ping_timespec, last_ping_timespec);
+
+	printf("%i packets transmitted, %i received, %i%% packet loss, time %lums\n", 
+		packet_transmitted, packet_received, loss_percent, total_time_ms);
+	rtt_info_print(&rtts);
+
 }
